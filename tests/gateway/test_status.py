@@ -734,7 +734,8 @@ class TestTakeoverMarker:
         assert marker.exists()
         payload = json.loads(marker.read_text())
         assert payload["target_pid"] == 12345
-        assert payload["target_start_time"] == 42
+        assert payload["target_start_time_us"] == 42
+        assert payload["target_start_time"] is None  # tombstone
         assert payload["replacer_pid"] == os.getpid()
         assert "written_at" in payload
 
@@ -804,7 +805,7 @@ class TestTakeoverMarker:
         ok = status.write_takeover_marker(target_pid=os.getpid())
         assert ok is True
         payload = json.loads((tmp_path / ".gateway-takeover.json").read_text())
-        assert payload["target_start_time"] is None
+        assert payload["target_start_time_us"] is None
 
         result = status.consume_takeover_marker_for_self()
 
@@ -933,7 +934,8 @@ class TestPlannedStopMarker:
         assert marker.exists()
         payload = json.loads(marker.read_text())
         assert payload["target_pid"] == 12345
-        assert payload["target_start_time"] == 42
+        assert payload["target_start_time_us"] == 42
+        assert payload["target_start_time"] is None  # tombstone
         assert payload["stopper_pid"] == os.getpid()
         assert "written_at" in payload
 
@@ -947,6 +949,22 @@ class TestPlannedStopMarker:
 
         assert result is True
         assert not (tmp_path / ".gateway-planned-stop.json").exists()
+
+    def test_probe_rejects_reused_pid_via_start_time_us(self, tmp_path, monkeypatch):
+        # Non-destructive probe: a marker naming our PID but recording a
+        # different start_time_us means the PID was reused -> must not match.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 111)
+        path = status._get_planned_stop_marker_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "target_pid": os.getpid(),
+            "target_start_time": None,
+            "target_start_time_us": 999,
+            "stopper_pid": 1,
+            "written_at": status._utc_now_iso(),
+        }), encoding="utf-8")
+        assert status.planned_stop_marker_targets_self() is False
 
     def test_consume_returns_false_for_different_pid(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -1024,9 +1042,10 @@ class TestPlannedStopMarker:
 
         ok = status.write_planned_stop_marker(target_pid=os.getpid())
         assert ok is True
-        # Marker carries a null start_time, exactly as written on Windows.
+        # Marker carries a null start_time_us, exactly as written when psutil
+        # cannot read the process.
         payload = json.loads((tmp_path / ".gateway-planned-stop.json").read_text())
-        assert payload["target_start_time"] is None
+        assert payload["target_start_time_us"] is None
 
         result = status.consume_planned_stop_marker_for_self()
 

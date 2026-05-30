@@ -820,18 +820,15 @@ def _consume_pid_marker_for_self(
 
     our_pid = os.getpid()
     our_start_time = _get_process_start_time(our_pid)
-    # Start-time is a PID-reuse guard. It is only meaningful when both
-    # sides actually have it: ``_get_process_start_time`` returns None on
-    # platforms without ``/proc`` (macOS, native Windows — the very
-    # platform the planned-stop watcher exists for). Requiring a non-None
-    # match there would make every consume return False, so a legitimate
-    # ``hermes gateway stop`` on Windows would be misclassified as an
-    # unexpected ``UNKNOWN`` exit (exit 1) and revived by the service
-    # manager. So: when both start_times are known they must match; when
-    # either is unknown, fall back to PID equality alone (bounded by the
-    # marker's short TTL). This mirrors ``planned_stop_marker_targets_self``
-    # so the watcher's non-destructive probe and this authoritative
-    # consume agree on every platform (issue #34597).
+    # Start-time is a PID-reuse guard, meaningful only when both sides have it.
+    # ``_get_process_start_time`` returns None when psutil cannot read the
+    # process; requiring a non-None match would misclassify a legitimate
+    # ``hermes gateway stop`` as an unexpected ``UNKNOWN`` exit (exit 1) and let
+    # the service manager revive it. So: when both start times are known they
+    # must match; when either is unknown, fall back to PID equality alone
+    # (bounded by the marker's short TTL). Mirrors
+    # ``planned_stop_marker_targets_self`` so the watcher's non-destructive
+    # probe and this authoritative consume agree on every platform (#34597).
     if target_pid != our_pid:
         matches = False
     elif target_start_time is not None and our_start_time is not None:
@@ -859,10 +856,10 @@ def write_takeover_marker(target_pid: int) -> bool:
     is a best-effort signal, not a correctness requirement).
     """
     try:
-        target_start_time = _get_process_start_time(target_pid)
         record = {
             "target_pid": target_pid,
-            "target_start_time": target_start_time,
+            "target_start_time": None,  # tombstone (pre-fix readers)
+            "target_start_time_us": _get_process_start_time(target_pid),
             "replacer_pid": os.getpid(),
             "written_at": _utc_now_iso(),
         }
@@ -886,7 +883,7 @@ def consume_takeover_marker_for_self() -> bool:
     return _consume_pid_marker_for_self(
         _get_takeover_marker_path(),
         pid_field="target_pid",
-        start_time_field="target_start_time",
+        start_time_field="target_start_time_us",
         ttl_s=_TAKEOVER_MARKER_TTL_S,
     )
 
@@ -907,10 +904,10 @@ def write_planned_stop_marker(target_pid: int) -> bool:
     this short-lived marker first to let the target process exit cleanly.
     """
     try:
-        target_start_time = _get_process_start_time(target_pid)
         record = {
             "target_pid": target_pid,
-            "target_start_time": target_start_time,
+            "target_start_time": None,  # tombstone (pre-fix readers)
+            "target_start_time_us": _get_process_start_time(target_pid),
             "stopper_pid": os.getpid(),
             "written_at": _utc_now_iso(),
         }
@@ -925,7 +922,7 @@ def consume_planned_stop_marker_for_self() -> bool:
     return _consume_pid_marker_for_self(
         _get_planned_stop_marker_path(),
         pid_field="target_pid",
-        start_time_field="target_start_time",
+        start_time_field="target_start_time_us",
         ttl_s=_PLANNED_STOP_MARKER_TTL_S,
     )
 
@@ -955,7 +952,7 @@ def planned_stop_marker_targets_self() -> bool:
 
     try:
         target_pid = int(record["target_pid"])
-        target_start_time = record.get("target_start_time")
+        target_start_time = record.get("target_start_time_us")
         written_at = record.get("written_at") or ""
     except (KeyError, TypeError, ValueError):
         # Malformed marker can never match anyone — drop it.
@@ -978,14 +975,12 @@ def planned_stop_marker_targets_self() -> bool:
     if target_pid != our_pid:
         return False
 
-    # Start-time is a PID-reuse guard. It is only meaningful when both
-    # sides actually have it: ``_get_process_start_time`` returns None on
-    # platforms without ``/proc`` (macOS, native Windows — the very
-    # platform this watcher exists for). Requiring a non-None match there
-    # would make the watcher never fire and re-break the #33778 Windows
-    # session-resume path. So: when both start_times are known they must
-    # match; when either is unknown, fall back to PID equality alone
-    # (the marker is short-lived under a 60s TTL, bounding reuse risk).
+    # Start-time is a PID-reuse guard, meaningful only when both sides have it.
+    # ``_get_process_start_time`` returns None when psutil cannot read the
+    # process; requiring a non-None match would make the watcher never fire and
+    # re-break the #33778 session-resume path. So: when both start times are
+    # known they must match; when either is unknown, fall back to PID equality
+    # alone (the marker is short-lived under a 60s TTL, bounding reuse risk).
     our_start_time = _get_process_start_time(our_pid)
     if target_start_time is not None and our_start_time is not None:
         return target_start_time == our_start_time
