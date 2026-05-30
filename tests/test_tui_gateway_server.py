@@ -5322,3 +5322,67 @@ def test_shutdown_sessions_closes_every_session_via_helper(monkeypatch):
         assert {reason for _, reason in seen} == {"tui_shutdown"}
     finally:
         server._sessions.clear()
+
+
+def _idle_evictable_session(now):
+    """A session that satisfies every eviction precondition."""
+    ready = threading.Event()
+    ready.set()
+    old = now - 10 * 3600  # well past the 6h TTL
+    return {
+        "running": False,
+        "agent_ready": ready,
+        "transport": server._stdio_transport,  # dead/detached
+        "last_active": old,
+        "created_at": old,
+    }
+
+
+def test_session_is_evictable_when_idle_dead_and_quiescent(monkeypatch):
+    monkeypatch.setattr(server, "_session_pending_kind", lambda sid: "")
+    now = time.time()
+    assert server._session_is_evictable("s", _idle_evictable_session(now), now) is True
+
+
+def test_session_not_evictable_violating_each_exemption(monkeypatch):
+    monkeypatch.setattr(server, "_session_pending_kind", lambda sid: "")
+    now = time.time()
+    live_transport = type("T", (), {"_closed": False})()
+
+    running = _idle_evictable_session(now) | {"running": True}
+    assert server._session_is_evictable("s", running, now) is False
+
+    starting = _idle_evictable_session(now)
+    starting["agent_ready"] = threading.Event()  # not set -> still starting
+    assert server._session_is_evictable("s", starting, now) is False
+
+    on_socket = _idle_evictable_session(now) | {"transport": live_transport}
+    assert server._session_is_evictable("s", on_socket, now) is False
+
+    recent = _idle_evictable_session(now) | {"last_active": now}
+    assert server._session_is_evictable("s", recent, now) is False
+
+    young = _idle_evictable_session(now) | {"created_at": now}
+    assert server._session_is_evictable("s", young, now) is False
+
+    # Pending input request, even when everything else looks idle.
+    monkeypatch.setattr(server, "_session_pending_kind", lambda sid: "input")
+    assert server._session_is_evictable("s", _idle_evictable_session(now), now) is False
+
+
+def test_reap_idle_sessions_closes_only_evictable(monkeypatch):
+    closed = []
+    monkeypatch.setattr(server, "_session_pending_kind", lambda sid: "")
+    monkeypatch.setattr(
+        server, "_close_session_by_id",
+        lambda sid, *, end_reason: closed.append((sid, end_reason)),
+    )
+    now = time.time()
+    server._sessions.clear()
+    server._sessions["stale"] = _idle_evictable_session(now)
+    server._sessions["fresh"] = _idle_evictable_session(now) | {"last_active": now}
+    try:
+        server._reap_idle_sessions()
+        assert closed == [("stale", "idle_timeout")]
+    finally:
+        server._sessions.clear()
