@@ -636,6 +636,9 @@ class TestScopedLocks:
         assert payload["pid"] == os.getpid()
 
     def test_release_scoped_lock_only_removes_current_owner(self, tmp_path, monkeypatch):
+        # Guards the self-release lock LEAK: release must compare start_time_us,
+        # not the tombstoned legacy start_time (None) — comparing the latter
+        # against this process's live epoch-us value would refuse to unlink.
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
 
         acquired, _ = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
@@ -655,12 +658,14 @@ class TestScopedLocks:
         other_lock = lock_dir / "slack-app-token-other.lock"
         target_lock.write_text(json.dumps({
             "pid": 111,
-            "start_time": 222,
+            "start_time": None,
+            "start_time_us": 222,
             "kind": "hermes-gateway",
         }))
         other_lock.write_text(json.dumps({
             "pid": 999,
-            "start_time": 333,
+            "start_time": None,
+            "start_time_us": 333,
             "kind": "hermes-gateway",
         }))
 
@@ -681,7 +686,8 @@ class TestScopedLocks:
         reused_pid_lock = lock_dir / "telegram-bot-token-reused.lock"
         reused_pid_lock.write_text(json.dumps({
             "pid": 111,
-            "start_time": 999,
+            "start_time": None,
+            "start_time_us": 999,
             "kind": "hermes-gateway",
         }))
 

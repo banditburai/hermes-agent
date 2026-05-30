@@ -690,7 +690,7 @@ def release_scoped_lock(scope: str, identity: str) -> None:
         return
     if existing.get("pid") != os.getpid():
         return
-    if existing.get("start_time") != _get_process_start_time(os.getpid()):
+    if existing.get("start_time_us") != _get_process_start_time(os.getpid()):
         return
     try:
         lock_path.unlink(missing_ok=True)
@@ -732,7 +732,7 @@ def release_all_scoped_locks(
                     continue
                 if (
                     owner_start_time is not None
-                    and record.get("start_time") != owner_start_time
+                    and record.get("start_time_us") != owner_start_time
                 ):
                     continue
             try:
