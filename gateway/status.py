@@ -109,12 +109,23 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 
 
 def _get_process_start_time(pid: int) -> Optional[int]:
-    """Return the kernel start time for a process when available."""
-    stat_path = Path(f"/proc/{pid}/stat")
+    """Return the process creation time in epoch microseconds, or None.
+
+    Uses ``psutil.Process(pid).create_time()``, supported on Linux, macOS and
+    Windows — unlike the historical ``/proc/<pid>/stat`` field-22 read, which
+    returned None on every platform without ``/proc`` and silently disabled the
+    PID-reuse guard there. Microsecond integers are exact-comparable across JSON
+    round-trips and, being epoch-based (not jiffies-since-boot), do not collide
+    across reboots. Returns None on any failure so callers fall back to the
+    cmdline/argv oracle rather than raising.
+    """
     try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
-        return int(stat_path.read_text(encoding="utf-8").split()[21])
-    except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
+        import psutil  # hard dependency (pyproject.toml); guarded for safety
+    except ImportError:
+        return None
+    try:
+        return round(psutil.Process(pid).create_time() * 1_000_000)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError, ValueError):
         return None
 
 
