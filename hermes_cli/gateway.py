@@ -2912,7 +2912,19 @@ def generate_launchd_plist() -> str:
         <key>SuccessfulExit</key>
         <false/>
     </dict>
-    
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>8192</integer>
+    </dict>
+
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>16384</integer>
+    </dict>
+
     <key>StandardOutPath</key>
     <string>{log_dir}/gateway.log</string>
     
