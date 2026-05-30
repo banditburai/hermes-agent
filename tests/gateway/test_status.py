@@ -28,6 +28,18 @@ class TestGatewayPidState:
         # instead of KeyError-ing or misreading microseconds as /proc jiffies.
         assert rec["start_time"] is None
 
+    def test_pre_fix_reader_does_not_false_evict_new_record(self, monkeypatch):
+        # Downgrade safety: a pre-fix binary compares the legacy start_time as a
+        # raw /proc-jiffies int (stale only if non-None AND != its live value).
+        # Our records tombstone it to None, so that guard is skipped and the live
+        # lock is preserved — the whole reason we tombstone instead of omit.
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 111)
+        record = status._build_pid_record()
+        pre_fix_would_evict = (
+            record.get("start_time") is not None and record.get("start_time") != 30_000_000
+        )
+        assert pre_fix_would_evict is False
+
     def test_write_pid_file_is_atomic_against_concurrent_writers(self, tmp_path, monkeypatch):
         """Regression: two concurrent --replace invocations must not both win.
 
@@ -303,11 +315,15 @@ class TestGatewayRuntimeStatus:
             "updated_at": "2025-01-01T00:00:00Z",
         }))
 
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 2000)
         status.write_runtime_status(gateway_state="running")
 
         payload = status.read_runtime_status()
         assert payload["pid"] == os.getpid(), "PID should be overwritten, not preserved via setdefault"
-        assert payload["start_time"] != 1000.0, "start_time should be overwritten on restart"
+        # Stale 1000.0 must be gone: the live time now lives in start_time_us and
+        # the legacy field is tombstoned to None.
+        assert payload["start_time_us"] == 2000
+        assert payload["start_time"] is None
 
     def test_write_runtime_status_overwrites_stale_argv_on_restart(self, tmp_path, monkeypatch):
         """Regression: gateway_state.json must not keep the previous launch argv."""
@@ -331,7 +347,8 @@ class TestGatewayRuntimeStatus:
         payload = status.read_runtime_status()
         assert payload["argv"] == ["/new/path/hermes", "gateway", "run"]
         assert payload["pid"] == os.getpid()
-        assert payload["start_time"] == 2000
+        assert payload["start_time_us"] == 2000
+        assert payload["start_time"] is None
 
     def test_write_runtime_status_records_platform_failure(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -501,12 +518,14 @@ class TestScopedLocks:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
             "pid": 99999,
-            "start_time": 123,
+            "start_time": None,
+            "start_time_us": 123,
             "kind": "hermes-gateway",
         }))
 
         # Post-#21561 the liveness probe routes through
         # ``gateway.status._pid_exists`` (psutil-first, safe on Windows).
+        # Live start_time_us equals the recorded one -> same incarnation -> live.
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
 
