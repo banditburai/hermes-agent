@@ -5198,3 +5198,63 @@ def test_slash_worker_close_reaps_zombie_and_closes_fds():
     assert calls["kill"] == 1
     assert calls["wait"] >= 2  # reaped after both terminate and kill
     assert calls["stdin"] == calls["stdout"] == calls["stderr"] == 1
+
+
+def test_close_session_by_id_is_idempotent_and_full(monkeypatch):
+    """One call tears the session down fully; a second is a no-op."""
+    calls = {"worker": 0, "agent": 0, "unreg": 0, "finalize": 0}
+
+    class W:
+        def close(self):
+            calls["worker"] += 1
+
+    class A:
+        def close(self):
+            calls["agent"] += 1
+
+    monkeypatch.setattr(
+        server, "_finalize_session",
+        lambda s, end_reason="tui_close": calls.__setitem__("finalize", calls["finalize"] + 1),
+    )
+    monkeypatch.setattr(
+        "tools.approval.unregister_gateway_notify",
+        lambda key: calls.__setitem__("unreg", calls["unreg"] + 1), raising=False,
+    )
+    server._sessions["sid-1"] = {"session_key": "k1", "agent": A(), "slash_worker": W()}
+
+    assert server._close_session_by_id("sid-1", end_reason="ws_disconnect") is True
+    assert server._close_session_by_id("sid-1", end_reason="ws_disconnect") is False
+    assert calls == {"worker": 1, "agent": 1, "unreg": 1, "finalize": 1}
+    assert "sid-1" not in server._sessions
+
+
+def test_attach_worker_closes_orphan_when_session_already_torn_down():
+    """A worker built after its session was reaped must be closed, not orphaned."""
+    closed = []
+
+    class W:
+        def close(self):
+            closed.append(True)
+
+    server._sessions.pop("gone", None)
+    detached = {"session_key": "k"}  # not in _sessions -> already torn down
+    server._attach_worker("gone", detached, W())
+
+    assert closed == [True]
+    assert "slash_worker" not in detached
+    assert "gone" not in server._sessions
+
+
+def test_attach_worker_stores_worker_on_live_session():
+    class W:
+        def close(self):
+            raise AssertionError("must not close a worker for a live session")
+
+    live = {"session_key": "k"}
+    server._sessions["live"] = live
+    worker = W()
+    try:
+        server._attach_worker("live", live, worker)
+        assert live["slash_worker"] is worker
+    finally:
+        server._sessions.pop("live", None)

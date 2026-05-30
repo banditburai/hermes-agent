@@ -116,6 +116,10 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
+# Serializes session teardown (pop) against worker attachment so a worker built
+# after its session was reaped can't be orphaned. Reentrant: _close_session_by_id
+# may run under callers that already hold it.
+_sessions_lock = threading.RLock()
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
@@ -339,6 +343,45 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
                 db.end_session(session_id, end_reason)
         except Exception:
             pass
+
+
+def _attach_worker(sid: str, session: dict, worker) -> None:
+    """Store worker on session iff sid still maps to it, else close it — a
+    concurrent teardown already popped the session and would orphan the worker."""
+    with _sessions_lock:
+        if _sessions.get(sid) is session:
+            session["slash_worker"] = worker
+            return
+    worker.close()
+
+
+def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
+    """Single idempotent teardown for one session: pop, finalize, unregister
+    notify, close agent + slash worker. True iff it closed a live session."""
+    with _sessions_lock:
+        session = _sessions.pop(sid, None)
+    if session is None:
+        return False
+    _finalize_session(session, end_reason=end_reason)
+    try:
+        from tools.approval import unregister_gateway_notify
+
+        if key := session.get("session_key"):
+            unregister_gateway_notify(key)
+    except Exception:
+        pass
+    try:
+        agent = session.get("agent")
+        if agent is not None and hasattr(agent, "close"):
+            agent.close()
+    except Exception:
+        pass
+    try:
+        if worker := session.get("slash_worker"):
+            worker.close()
+    except Exception:
+        pass
+    return True
 
 
 def _shutdown_sessions() -> None:
@@ -583,7 +626,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
 
             try:
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
-                current["slash_worker"] = worker
+                _attach_worker(sid, current, worker)
             except Exception:
                 pass
 
@@ -618,19 +661,16 @@ def _start_agent_build(sid: str, session: dict) -> None:
             current["agent_error"] = str(e)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
-            if _sessions.get(sid) is not current:
-                if worker is not None:
-                    try:
-                        worker.close()
-                    except Exception:
-                        pass
-                if notify_registered:
-                    try:
-                        from tools.approval import unregister_gateway_notify
+            # _attach_worker already closed the worker if this session was
+            # reaped mid-build; only the late notify registration can still
+            # leak (session.close unregistered before _build registered it).
+            if notify_registered and _sessions.get(sid) is not current:
+                try:
+                    from tools.approval import unregister_gateway_notify
 
-                        unregister_gateway_notify(key)
-                    except Exception:
-                        pass
+                    unregister_gateway_notify(key)
+                except Exception:
+                    pass
             ready.set()
 
     threading.Thread(target=_build, daemon=True).start()
@@ -2115,8 +2155,8 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         "transport": current_transport() or _stdio_transport,
     }
     try:
-        _sessions[sid]["slash_worker"] = _SlashWorker(
-            key, getattr(agent, "model", _resolve_model())
+        _attach_worker(
+            sid, _sessions[sid], _SlashWorker(key, getattr(agent, "model", _resolve_model()))
         )
     except Exception:
         # Defer hard-failure to slash.exec; chat still works without slash worker.
@@ -6004,7 +6044,7 @@ def _(rid, params: dict) -> dict:
                 session["session_key"],
                 getattr(session.get("agent"), "model", _resolve_model()),
             )
-            session["slash_worker"] = worker
+            _attach_worker(params.get("session_id", ""), session, worker)
         except Exception as e:
             return _err(rid, 5030, f"slash worker start failed: {e}")
 
