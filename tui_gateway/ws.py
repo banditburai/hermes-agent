@@ -166,11 +166,14 @@ async def handle_ws(ws: Any) -> None:
     finally:
         transport.close()
 
-        # Detach the transport from any sessions it owned so later emits
-        # fall back to stdio instead of crashing into a closed socket.
-        for _, sess in list(server._sessions.items()):
-            if sess.get("transport") is transport:
-                sess["transport"] = server._stdio_transport
+        # Reap sessions this transport owned (close_on_disconnect) or detach the
+        # rest back to stdio so later emits don't crash into a closed socket.
+        # Offloaded: _close_session_by_id does a blocking worker.close() (terminate
+        # + waits) plus a synchronous DB write — inline that would freeze the
+        # uvicorn event loop for every other live connection.
+        await asyncio.to_thread(
+            server._close_sessions_for_transport, transport, end_reason="ws_disconnect"
+        )
 
         try:
             await ws.close()
