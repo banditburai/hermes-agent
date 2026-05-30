@@ -1,5 +1,7 @@
 import re
 
+import pytest
+
 from hermes_cli import gateway
 
 
@@ -29,3 +31,22 @@ def test_launchd_plist_without_fd_limits_reads_as_stale(tmp_path, monkeypatch):
     assert old != current
     plist_path.write_text(old, encoding="utf-8")
     assert gateway.launchd_plist_is_current() is False
+
+
+def test_run_gateway_self_heals_launchd_plist_on_macos(monkeypatch):
+    """A code update that ships new plist settings (e.g. the fd-limit bump) must
+    reach macOS on the next boot, not only on an explicit `hermes update`."""
+    monkeypatch.setattr(gateway, "is_macos", lambda: True)
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(gateway, "_guard_official_docker_root_gateway", lambda: None)
+    healed = []
+    monkeypatch.setattr(gateway, "refresh_launchd_plist_if_needed", lambda: healed.append(True))
+
+    class _Halt(Exception):
+        pass
+
+    monkeypatch.setattr("gateway.run.start_gateway", lambda *a, **k: (_ for _ in ()).throw(_Halt()))
+
+    with pytest.raises(_Halt):
+        gateway.run_gateway()
+    assert healed == [True]

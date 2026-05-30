@@ -3270,7 +3270,16 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
             refresh_systemd_unit_if_needed(system=False)
         except Exception:
             pass  # best-effort; don't block gateway startup
-    
+    elif is_macos():
+        # Same rationale for launchd: an exit-75/`/restart` respawn skips
+        # `hermes gateway restart`, so without this the fd-limit bump (and any
+        # future plist change) wouldn't reach existing installs until a manual
+        # restart or `hermes update`.
+        try:
+            refresh_launchd_plist_if_needed()
+        except Exception:
+            pass  # best-effort; don't block gateway startup
+
     from gateway.run import start_gateway
     
     print("┌─────────────────────────────────────────────────────────┐")
